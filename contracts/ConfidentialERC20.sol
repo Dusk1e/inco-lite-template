@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 contract ConfidentialERC20 is Ownable2Step {
 
     error InsufficientFees();
+    error UnauthorizedHandle();
 
     event Transfer(address indexed from, address indexed to, euint256 amount);
     event Approval(
@@ -84,6 +85,7 @@ contract ConfidentialERC20 is Ownable2Step {
         address to,
         euint256 amount
     ) public virtual returns (bool) {
+        _requireHandleAccess(amount);
         e.allow(amount, address(this));
         ebool canTransfer = e.ge(balances[msg.sender], amount);
 
@@ -106,6 +108,7 @@ contract ConfidentialERC20 is Ownable2Step {
         address spender,
         euint256 amount
     ) public virtual returns (bool) {
+        _requireHandleAccess(amount);
         _approve(msg.sender, spender, amount);
         emit Approval(msg.sender, spender, amount);
         return true;
@@ -160,6 +163,7 @@ contract ConfidentialERC20 is Ownable2Step {
         address to,
         euint256 amount
     ) public virtual returns (bool) {
+        _requireHandleAccess(amount);
         e.allow(amount, address(this));
 
         ebool isTransferable = _updateAllowance(from, msg.sender, amount);
@@ -221,6 +225,15 @@ contract ConfidentialERC20 is Ownable2Step {
         e.allow(balances[from], from);
 
         emit Transfer(from, to, transferValue);
+    }
+
+    // Encrypted parameters must be checked before they are used. This contract holds ACL access on
+    // every holder's balance and allowance, so it can grant that access onwards -- an unchecked
+    // handle argument lets any caller hand in a victim's balance handle and be granted decryption
+    // rights on it. Handles built from a ciphertext by the payable overloads are already allowed to
+    // msg.sender by e.newEuint256(), so those paths are unaffected.
+    function _requireHandleAccess(euint256 amount) internal view {
+        if (!e.isAllowed(msg.sender, amount)) revert UnauthorizedHandle();
     }
 
     // Fees are calculated based on the number of ciphertext inputs consumed

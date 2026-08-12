@@ -540,4 +540,89 @@ describe("ConfidentialERC20 Tests", () => {
       }
     });
   });
+
+  describe("------- Handle Authorization Tests -------", () => {
+    beforeEach(async () => {
+      // Mint 5000 cUSD to owner, then move 1000 to Bob so Bob holds a confidential balance
+      const mintTx = await wallet.writeContract({
+        address: contractAddress,
+        abi: confidentialERC20Abi.abi,
+        functionName: "mint",
+        args: [parseEther("5000")],
+      });
+      await publicClient.waitForTransactionReceipt({ hash: mintTx });
+      await sleep(COVALIDATOR_DELAY);
+
+      const encryptedAmount = await encryptValue({
+        value: parseEther("1000"),
+        address: wallet.account.address,
+        contractAddress,
+      });
+      const transferAbi = confidentialERC20Abi.abi.filter(
+        (item: any) =>
+          item.type === "function" &&
+          item.name === "transfer" &&
+          item.stateMutability === "payable" &&
+          item.inputs?.[1]?.type === "bytes"
+      );
+      const transferTx = await wallet.writeContract({
+        address: contractAddress,
+        abi: transferAbi,
+        functionName: "transfer",
+        args: [namedWallets.bob.account?.address as Address, encryptedAmount],
+        value: await getFee(),
+      });
+      await publicClient.waitForTransactionReceipt({ hash: transferTx });
+      await sleep(COVALIDATOR_DELAY);
+    });
+
+    it("Should not let a caller hand in a balance handle it does not own", async () => {
+      console.log("\nCarol tries to read Bob's confidential balance");
+
+      // Bob is the victim rather than the owner: right after the first mint the owner's balance
+      // handle is the same handle as totalSupply (same op, same inputs) and mint() reveals
+      // totalSupply, so the owner's balance would decrypt for an unrelated reason.
+      const victimBalanceHandle = (await publicClient.readContract({
+        address: getAddress(contractAddress),
+        abi: confidentialERC20Abi.abi,
+        functionName: "balanceOf",
+        args: [namedWallets.bob.account?.address as Address],
+      })) as HexString;
+      console.log(`Bob's balance handle: ${victimBalanceHandle}`);
+
+      // The euint256 overload of approve(), which takes a raw handle instead of a ciphertext.
+      const approveHandleAbi = confidentialERC20Abi.abi.filter(
+        (item: any) =>
+          item.type === "function" &&
+          item.name === "approve" &&
+          item.inputs?.[1]?.type === "bytes32"
+      );
+
+      // Carol passes Bob's balance handle straight into approve(). The contract holds ACL access
+      // on every holder's balance, so it is in a position to grant that access onwards.
+      let leaked: bigint | null = null;
+      try {
+        const txHash = await namedWallets.carol.writeContract({
+          address: contractAddress,
+          abi: approveHandleAbi,
+          functionName: "approve",
+          args: [namedWallets.carol.account?.address as Address, victimBalanceHandle],
+          account: namedWallets.carol.account!,
+          chain: namedWallets.carol.chain,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: txHash });
+        await sleep(COVALIDATOR_DELAY);
+
+        leaked = await decryptValue({
+          walletClient: namedWallets.carol,
+          handle: victimBalanceHandle.toString(),
+        });
+        console.log(`LEAKED: Carol decrypted the victim balance as ${formatEther(leaked)} cUSD`);
+      } catch (error: any) {
+        console.log(`Carol was rejected: ${error.shortMessage || error.message}`);
+      }
+
+      expect(leaked).toBeNull();
+    });
+  });
 });
